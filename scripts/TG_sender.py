@@ -5,20 +5,28 @@ import threading
 from PIL import Image
 from modules import shared, script_callbacks
 
+COLOR_TELEGRAM = "\033[96m"
+COLOR_RESET = "\033[0m"
+
+def print_colored(message: str):
+    """Outputs text with a colored [TelegramSender] tag"""
+    print(f"{COLOR_TELEGRAM}[TelegramSender]{COLOR_RESET} {message}")
+
 def debug_print(message: str):
+    """Outputs debug messages if debug mode is enabled."""
     if shared.opts.data.get("telegram_debug_mode", False):
-        print("[TelegramSender DEBUG]", message)
+        print(f"{COLOR_TELEGRAM}[DEBUG]{COLOR_RESET} {message}")
 
 def resize_image(image_path: str) -> str:
-    """Resizes the image for Telegram while maintaining orientation."""
+    """Resizes image while maintaining orientation."""
     try:
         with Image.open(image_path) as img:
             width, height = img.size
             max_width = shared.opts.data.get("telegram_landscape_max_width", 5120) if width >= height else shared.opts.data.get("telegram_max_size", 2560)
-            
+
             if max(width, height) <= max_width:
                 return image_path  # No resize needed
-            
+
             ratio = max_width / max(width, height)
             new_size = (int(width * ratio), int(height * ratio))
             img = img.resize(new_size, Image.LANCZOS)
@@ -27,7 +35,7 @@ def resize_image(image_path: str) -> str:
             img.save(temp_path, "JPEG", quality=85, optimize=True)
             return temp_path
     except Exception as e:
-        print(f"[TelegramSender] Error resizing image: {e}")
+        print_colored(f"Error resizing image: {e}")
         return image_path
 
 def compress_image_for_telegram(image_path: str, target_size: int = 10 * 1024 * 1024) -> str:
@@ -43,7 +51,7 @@ def compress_image_for_telegram(image_path: str, target_size: int = 10 * 1024 * 
                 quality -= 10
             return temp_path
     except Exception as e:
-        print(f"[TelegramSender] Error compressing image: {e}")
+        print_colored(f"Error compressing image: {e}")
         return image_path
 
 def extract_key(filename: str) -> str:
@@ -52,10 +60,14 @@ def extract_key(filename: str) -> str:
     return f"lora {match.group(1).strip()}" if match else ""
 
 def send_to_telegram(image_path: str, chat_id: str, as_document=False):
-    """Sends a file to Telegram and deletes it after successful upload."""
+    """Sends file to Telegram and deletes it after successful upload."""
+    if shared.opts.data.get("telegram_disable_sending", False):
+        debug_print(f"Sending disabled. Skipping file: {image_path}")
+        return
+
     bot_token = shared.opts.data.get("telegram_bot_token", "YOUR_BOT_TOKEN")
     if not bot_token or bot_token == "YOUR_BOT_TOKEN":
-        print("[TelegramSender] Telegram Bot Token is not configured – send canceled.")
+        print_colored("Telegram Bot Token is not configured – send canceled.")
         return
 
     method = "sendDocument" if as_document else "sendPhoto"
@@ -69,12 +81,12 @@ def send_to_telegram(image_path: str, chat_id: str, as_document=False):
             response = requests.post(url, data=data, files=files)
 
         if response.ok:
-            print(f"[TelegramSender] File '{image_path}' sent to Telegram (chat {chat_id}) as {method}.")
+            print_colored(f"File '{image_path}' sent to Telegram (chat {chat_id}) as {method}.")
             delete_temp_file(image_path)  # Delete only after successful send
         else:
-            print(f"[TelegramSender] Error sending file: {response.text}")
+            print_colored(f"Error sending file: {response.text}")
     except Exception as e:
-        print(f"[TelegramSender] Exception while sending file: {e}")
+        print_colored(f"Exception while sending file: {e}")
 
 def delete_temp_file(file_path: str):
     """Deletes a file if it exists."""
@@ -87,6 +99,10 @@ def delete_temp_file(file_path: str):
 
 def on_image_saved(params):
     """Handles image sending: extracts key, routes image, resizes, compresses, and sends."""
+    if shared.opts.data.get("telegram_disable_sending", False):
+        debug_print("Sending disabled. Skipping all images.")
+        return
+
     image_path = params.filename if hasattr(params, "filename") else None
     if not image_path or "outputs/grids/" in image_path.replace("\\", "/"):
         return  # Ignore grids
@@ -97,21 +113,20 @@ def on_image_saved(params):
     chat_id = mapping.get(key)
 
     if not chat_id:
-        print(f"[TelegramSender] No mapping found for key '{key}'. Not sending image.")
+        print_colored(f"No mapping found for key '{key}'. Not sending image.")
         return
 
-    print(f"[TelegramSender] Sending '{image_path}' to Telegram (chat {chat_id}).")
+    print_colored(f"Sending '{image_path}' to Telegram (chat {chat_id}).")
 
     # Resize image for sending as photo
     resized_path = resize_image(image_path)
-    is_temp_file = (resized_path != image_path)
 
     # If resized version is still too big, further compress it
     try:
         if os.path.getsize(resized_path) > 10 * 1024 * 1024:
             resized_path = compress_image_for_telegram(resized_path)
     except Exception as e:
-        print(f"[TelegramSender] Error checking resized image size: {e}")
+        print_colored(f"Error checking resized image size: {e}")
 
     # Send compressed/resized version as photo
     threading.Thread(target=send_to_telegram, args=(resized_path, chat_id, False)).start()
@@ -128,6 +143,7 @@ def on_ui_settings():
     shared.opts.add_option("telegram_bot_token", shared.OptionInfo("YOUR_BOT_TOKEN", "Telegram Bot Token", section=section))
     shared.opts.add_option("telegram_channel_mapping", shared.OptionInfo("lora somelora:CHAT_ID", "Channel Mapping (format: key:chat_id; separate pairs with semicolons)", section=section))
     shared.opts.add_option("telegram_full_res", shared.OptionInfo(False, "Send Full Resolution (as Document) along with resized copy", section=section))
+    shared.opts.add_option("telegram_disable_sending", shared.OptionInfo(False, "Disable Sending to Telegram", section=section))
     shared.opts.add_option("telegram_debug_mode", shared.OptionInfo(False, "Enable Debug Mode", section=section))
     shared.opts.add_option("telegram_max_size", shared.OptionInfo(2560, "Max size for portrait/square images (px)", section=section))
     shared.opts.add_option("telegram_landscape_max_width", shared.OptionInfo(5120, "Max width for landscape images (px)", section=section))
