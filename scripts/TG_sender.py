@@ -7,7 +7,7 @@ from PIL import Image
 from modules import shared, script_callbacks
 from transformers import pipeline
 
-# Попытка загрузки модели NSFW
+# Attempt to load the NSFW detection model
 try:
     nsfw_pipeline = pipeline('image-classification', model='AdamCodd/vit-nsfw-stable-diffusion')
     print(f"\033[96m[TelegramSender]\033[0m NSFW detection model loaded successfully.")
@@ -19,22 +19,23 @@ COLOR_TELEGRAM = "\033[96m"
 COLOR_RESET = "\033[0m"
 
 def print_colored(message: str):
-    """Печатает цветной текст с тегом [TelegramSender]."""
+    """Prints colored text with [TelegramSender] tag."""
     print(f"{COLOR_TELEGRAM}[TelegramSender]{COLOR_RESET} {message}")
 
 def debug_print(message: str):
-    """Печатает отладочные сообщения, если включен режим отладки."""
+    """Prints debug messages if debug mode is enabled."""
     if shared.opts.data.get("telegram_debug_mode", False):
         print(f"{COLOR_TELEGRAM}[DEBUG]{COLOR_RESET} {message}")
 
 def resize_image(image_path: str) -> str:
     """
-    Изменяет размер изображения в зависимости от ориентации:
-      - Для горизонтальных изображений, если ширина превышает telegram_landscape_max_width,
-        изменяет размер так, чтобы ширина равнялась telegram_landscape_max_width.
-      - Для вертикальных/квадратных изображений, если большая сторона превышает telegram_max_size,
-        изменяет размер так, чтобы большая сторона равнялась telegram_max_size.
-    Возвращает путь к временному файлу JPEG, если было изменение размера, иначе исходный путь.
+    Resizes the image based on its orientation:
+      - For landscape images, if width exceeds telegram_landscape_max_width,
+        resizes so that width equals telegram_landscape_max_width.
+      - For portrait/square images, if the largest side exceeds telegram_max_size,
+        resizes so that the largest side equals telegram_max_size.
+    Returns the path to a temporary resized JPEG file if resizing occurred,
+    otherwise returns the original image_path.
     """
     try:
         with Image.open(image_path) as img:
@@ -64,8 +65,8 @@ def resize_image(image_path: str) -> str:
 
 def compress_image_for_telegram(image_path: str, target_size: int = 10 * 1024 * 1024) -> str:
     """
-    Сжимает JPEG-изображение до размера меньше target_size (по умолчанию 10 МБ).
-    Возвращает путь к временному сжатому файлу.
+    Further compresses a JPEG image until its file size is below target_size (default 10MB).
+    Returns the path to a temporary compressed file.
     """
     temp_path = os.path.splitext(image_path)[0] + "_compressed.jpg"
     quality = 85
@@ -85,8 +86,8 @@ def compress_image_for_telegram(image_path: str, target_size: int = 10 * 1024 * 
 
 def extract_key(filename: str) -> str:
     """
-    Извлекает первый токен после "-lora" из имени файла.
-    Пример: "0001-indigoFurryMixXL_v30-lora SomeLora" → "lora somelora"
+    Extracts the first token after "-lora" from the filename.
+    Example: "0001-indigoFurryMixXL_v30-lora SomeLora" → "lora somelora"
     """
     debug_print(f"Extracting key from filename: {filename}")
     match = re.search(r"-lora\s+(\S+)", filename, re.IGNORECASE)
@@ -99,8 +100,8 @@ def extract_key(filename: str) -> str:
 
 def delete_temp_file(file_path: str):
     """
-    Удаляет файл, если он существует и его имя указывает на временный файл 
-    (содержит "_resized" или "_compressed"). Предотвращает удаление оригиналов.
+    Deletes the file if it exists and if its name indicates it's a temporary file 
+    (i.e., contains "_resized" or "_compressed"). This prevents deletion of original images.
     """
     try:
         if os.path.exists(file_path):
@@ -115,9 +116,9 @@ def delete_temp_file(file_path: str):
 
 def send_to_telegram(image_path: str, chat_id: str, as_document=False):
     """
-    Отправляет файл по указанному пути в Telegram с повторными попытками.
-    Если as_document=True, отправляет как документ; иначе как фото.
-    В режиме фото, если размер превышает 10 МБ, дополнительно сжимает изображение.
+    Sends the file at image_path to the specified Telegram chat with retry attempts.
+    If as_document is True, sends as document; otherwise sends as photo.
+    In photo mode, if the file size exceeds 10MB, further compresses the image.
     """
     if shared.opts.data.get("telegram_disable_sending", False):
         debug_print(f"Sending disabled. Skipping file: {image_path}")
@@ -168,12 +169,12 @@ def send_to_telegram(image_path: str, chat_id: str, as_document=False):
     print_colored(f"Failed to send '{image_path}' after {max_retries} attempts. File not deleted.")
 
 def predict_nsfw(image_path):
-    """Классифицирует изображение как NSFW или SFW с помощью модели."""
+    """Classifies the image as NSFW or SFW using the model."""
     if nsfw_pipeline is None:
         return {image_path: {'Label': 'SFW', 'Score': 0.0}}
     try:
         img = Image.open(image_path)
-        img = img.resize((224, 224), Image.LANCZOS)  # Размер для ViT
+        img = img.resize((224, 224), Image.LANCZOS)  # Resize for ViT model
         result = nsfw_pipeline(img)
         nsfw_label = 'NSFW' if any(d['label'] == 'NSFW' for d in result) else 'SFW'
         score = max(d['score'] for d in result if d['label'] == nsfw_label)
@@ -184,10 +185,13 @@ def predict_nsfw(image_path):
 
 def on_image_saved(params):
     """
-    Вызывается после сохранения изображения.
-    Игнорирует файлы из "outputs/grids/".
-    Если включено обнаружение NSFW и изображение классифицировано как NSFW, отправляет в NSFW-канал.
-    Иначе извлекает ключ из имени файла по "-lora" и маршрутизирует соответственно.
+    Callback invoked after an image is saved.
+    Ignores files from "outputs/grids/".
+    If NSFW detection is enabled and the image is classified as NSFW, sends to the NSFW channel.
+    Otherwise, extracts the key from the filename using "-lora" and routes the file accordingly.
+    If a matching chat ID is found, sends:
+      - The resized (and further compressed, if necessary) image as a photo.
+      - If Full Resolution Mode is enabled, sends the original image as a document.
     """
     image_path = params.filename if hasattr(params, "filename") else None
     if not image_path or "outputs/grids/" in image_path.replace("\\", "/"):
@@ -196,7 +200,7 @@ def on_image_saved(params):
     filename = os.path.basename(image_path)
     debug_print(f"Filename: {filename}")
 
-    # Проверка NSFW-контента, если включено и модель доступна
+    # Check for NSFW content if enabled and model is available
     if shared.opts.data.get("enable_nsfw_detection", False) and nsfw_pipeline:
         try:
             output = predict_nsfw(image_path)
@@ -245,7 +249,7 @@ def on_image_saved(params):
 
     print_colored(f"Sending '{image_path}' to Telegram (chat {chat_id}).")
 
-    # Изменение размера для отправки как фото
+    # Resize image for sending as photo
     resized_path = resize_image(image_path)
     try:
         if os.path.getsize(resized_path) > 10 * 1024 * 1024:
@@ -253,17 +257,17 @@ def on_image_saved(params):
     except Exception as e:
         print_colored(f"Error checking resized image size: {e}")
 
-    # Отправка уменьшенной версии как фото
+    # Send resized version as photo
     threading.Thread(target=send_to_telegram, args=(resized_path, chat_id, False)).start()
 
-    # Отправка оригинала как документа, если включен режим полного разрешения
+    # Send original as document if full resolution mode is enabled
     if shared.opts.data.get("telegram_full_res", False):
         threading.Thread(target=send_to_telegram, args=(image_path, chat_id, True)).start()
 
 script_callbacks.on_image_saved(on_image_saved)
 
 def on_ui_settings():
-    """Регистрирует настройки в меню интерфейса."""
+    """Registers options in the UI settings menu."""
     section = ("telegram_sender", "Telegram Sender")
     shared.opts.add_option("telegram_bot_token", shared.OptionInfo("YOUR_BOT_TOKEN", "Telegram Bot Token", section=section))
     shared.opts.add_option("telegram_channel_mapping", shared.OptionInfo("lora somelora:CHAT_ID", "Channel Mapping (format: key:chat_id; separate pairs with semicolons)", section=section))
@@ -274,7 +278,7 @@ def on_ui_settings():
     shared.opts.add_option("telegram_landscape_max_width", shared.OptionInfo(5120, "Max width for landscape images (px)", section=section))
     shared.opts.add_option("telegram_retry_count", shared.OptionInfo(3, "Number of retry attempts", section=section))
     shared.opts.add_option("telegram_retry_delay", shared.OptionInfo(5, "Delay between retry attempts (seconds)", section=section))
-    # Новые опции для обнаружения NSFW
+    # New options for NSFW detection
     shared.opts.add_option("enable_nsfw_detection", shared.OptionInfo(False, "Enable NSFW Detection", section=section))
     shared.opts.add_option("nsfw_channel_id", shared.OptionInfo("", "NSFW Channel ID", section=section))
     shared.opts.add_option("nsfw_threshold", shared.OptionInfo(0.5, "NSFW Threshold (0 to 1)", section=section))
