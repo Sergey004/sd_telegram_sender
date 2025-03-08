@@ -5,15 +5,6 @@ import threading
 import time
 from PIL import Image
 from modules import shared, script_callbacks
-from transformers import pipeline
-
-# Attempt to load the NSFW detection model
-try:
-    nsfw_pipeline = pipeline('image-classification', model='AdamCodd/vit-nsfw-stable-diffusion')
-    print(f"\033[96m[TelegramSender]\033[0m NSFW detection model loaded successfully.")
-except Exception as e:
-    print(f"\033[96m[TelegramSender]\033[0m Failed to load NSFW detection model: {e}")
-    nsfw_pipeline = None
 
 COLOR_TELEGRAM = "\033[96m"
 COLOR_RESET = "\033[0m"
@@ -101,7 +92,7 @@ def extract_key(filename: str) -> str:
 def delete_temp_file(file_path: str):
     """
     Deletes the file if it exists and if its name indicates it's a temporary file 
-    (i.e., contains "_resized" or "_compressed"). This prevents deletion of original images.
+    (i.e. contains "_resized" or "_compressed"). This prevents deletion of original images.
     """
     try:
         if os.path.exists(file_path):
@@ -168,28 +159,12 @@ def send_to_telegram(image_path: str, chat_id: str, as_document=False):
             time.sleep(delay)
     print_colored(f"Failed to send '{image_path}' after {max_retries} attempts. File not deleted.")
 
-def predict_nsfw(image_path):
-    """Classifies the image as NSFW or SFW using the model."""
-    if nsfw_pipeline is None:
-        return {image_path: {'Label': 'SFW', 'Score': 0.0}}
-    try:
-        img = Image.open(image_path)
-        img = img.resize((224, 224), Image.LANCZOS)  # Resize for ViT model
-        result = nsfw_pipeline(img)
-        nsfw_label = 'NSFW' if any(d['label'] == 'NSFW' for d in result) else 'SFW'
-        score = max(d['score'] for d in result if d['label'] == nsfw_label)
-        return {image_path: {'Label': nsfw_label, 'Score': score}}
-    except Exception as e:
-        print_colored(f"Error in NSFW detection: {e}")
-        return {image_path: {'Label': 'SFW', 'Score': 0.0}}
-
 def on_image_saved(params):
     """
     Callback invoked after an image is saved.
     Ignores files from "outputs/grids/".
-    If NSFW detection is enabled and the image is classified as NSFW, sends to the NSFW channel.
-    Otherwise, extracts the key from the filename using "-lora" and routes the file accordingly.
-    If a matching chat ID is found, sends:
+    Then extracts the key from the filename using "-lora" and routes the file accordingly.
+    If a matching chat ID is found in the channel mapping, sends:
       - The resized (and further compressed, if necessary) image as a photo.
       - If Full Resolution Mode is enabled, sends the original image as a document.
     """
@@ -199,53 +174,17 @@ def on_image_saved(params):
 
     filename = os.path.basename(image_path)
     debug_print(f"Filename: {filename}")
+    key = extract_key(filename).lower()
+    debug_print(f"Routing key: {key}")
 
-    # Check for NSFW content if enabled and model is available
-    if shared.opts.data.get("enable_nsfw_detection", False) and nsfw_pipeline:
-        try:
-            output = predict_nsfw(image_path)
-            score = output[image_path]['Score']
-            label = output[image_path]['Label']
-            debug_print(f"NSFW detection: Label={label}, Score={score}")
-            if label == "NSFW" and score >= shared.opts.data.get("nsfw_threshold", 0.5):
-                nsfw_chat_id = shared.opts.data.get("nsfw_channel_id", "")
-                if nsfw_chat_id:
-                    chat_id = nsfw_chat_id
-                    print_colored(f"Image is NSFW (score={score}). Sending to NSFW channel {chat_id}.")
-                else:
-                    print_colored("NSFW detected but no NSFW channel ID configured. Proceeding with original routing.")
-                    key = extract_key(filename).lower()
-                    mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
-                    mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
-                    chat_id = mapping.get(key)
-                    if not chat_id:
-                        print_colored(f"No mapping found for key '{key}'. Not sending image.")
-                        return
-            else:
-                key = extract_key(filename).lower()
-                mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
-                mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
-                chat_id = mapping.get(key)
-                if not chat_id:
-                    print_colored(f"No mapping found for key '{key}'. Not sending image.")
-                    return
-        except Exception as e:
-            print_colored(f"Error in NSFW detection: {e}")
-            key = extract_key(filename).lower()
-            mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
-            mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
-            chat_id = mapping.get(key)
-            if not chat_id:
-                print_colored(f"No mapping found for key '{key}'. Not sending image.")
-                return
-    else:
-        key = extract_key(filename).lower()
-        mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
-        mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
-        chat_id = mapping.get(key)
-        if not chat_id:
-            print_colored(f"No mapping found for key '{key}'. Not sending image.")
-            return
+    mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
+    debug_print(f"Mapping string: {mapping_str}")
+    mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
+    debug_print(f"Parsed mapping: {mapping}")
+    chat_id = mapping.get(key)
+    if not chat_id:
+        print_colored(f"No mapping found for key '{key}'. Not sending image.")
+        return
 
     print_colored(f"Sending '{image_path}' to Telegram (chat {chat_id}).")
 
@@ -278,9 +217,5 @@ def on_ui_settings():
     shared.opts.add_option("telegram_landscape_max_width", shared.OptionInfo(5120, "Max width for landscape images (px)", section=section))
     shared.opts.add_option("telegram_retry_count", shared.OptionInfo(3, "Number of retry attempts", section=section))
     shared.opts.add_option("telegram_retry_delay", shared.OptionInfo(5, "Delay between retry attempts (seconds)", section=section))
-    # New options for NSFW detection
-    shared.opts.add_option("enable_nsfw_detection", shared.OptionInfo(False, "Enable NSFW Detection", section=section))
-    shared.opts.add_option("nsfw_channel_id", shared.OptionInfo("", "NSFW Channel ID", section=section))
-    shared.opts.add_option("nsfw_threshold", shared.OptionInfo(0.5, "NSFW Threshold (0 to 1)", section=section))
 
 script_callbacks.on_ui_settings(on_ui_settings)
