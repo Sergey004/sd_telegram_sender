@@ -4,17 +4,15 @@ import requests
 import threading
 import time
 from PIL import Image
-from modules import shared, script_callbacks
+from modules import shared, script_callbacks # type: ignore
 
 COLOR_TELEGRAM = "\033[96m"
 COLOR_RESET = "\033[0m"
 
 def print_colored(message: str):
-    """Prints colored text with [TelegramSender] tag."""
     print(f"{COLOR_TELEGRAM}[TelegramSender]{COLOR_RESET} {message}")
 
 def debug_print(message: str):
-    """Prints debug messages if debug mode is enabled."""
     if shared.opts.data.get("telegram_debug_mode", False):
         print(f"{COLOR_TELEGRAM}[DEBUG]{COLOR_RESET} {message}")
 
@@ -54,168 +52,170 @@ def resize_image(image_path: str) -> str:
         print_colored(f"Error resizing image: {e}")
         return image_path
 
-def compress_image_for_telegram(image_path: str, target_size: int = 10 * 1024 * 1024) -> str:
-    """
-    Further compresses a JPEG image until its file size is below target_size (default 10MB).
-    Returns the path to a temporary compressed file.
-    """
+def compress_image(image_path: str, target_size: int = 10 * 1024 * 1024) -> str:
     temp_path = os.path.splitext(image_path)[0] + "_compressed.jpg"
     quality = 85
     try:
         with Image.open(image_path) as img:
             while quality >= 30:
                 img.save(temp_path, "JPEG", quality=quality, optimize=True)
-                current_size = os.path.getsize(temp_path)
-                debug_print(f"Compressed with quality={quality}: size={current_size} bytes")
-                if current_size <= target_size:
+                if os.path.getsize(temp_path) <= target_size:
                     return temp_path
                 quality -= 10
-            return temp_path
+        return temp_path
     except Exception as e:
-        print_colored(f"Error compressing image: {e}")
+        print_colored(f"Compress error: {e}")
         return image_path
 
-def extract_key(filename: str) -> str:
-    """
-    Extracts the first token after "-lora" from the filename.
-    Example: "0001-indigoFurryMixXL_v30-lora SomeLora" → "lora somelora"
-    """
-    debug_print(f"Extracting key from filename: {filename}")
-    match = re.search(r"-lora\s+(\S+)", filename, re.IGNORECASE)
-    if match:
-        key_extracted = f"lora {match.group(1).strip()}"
-        debug_print(f"Extracted key: {key_extracted}")
-        return key_extracted
-    debug_print("No '-lora' marker found in filename.")
-    return ""
+def delete_temp_file(path: str):
+    if os.path.exists(path) and ("_resized" in path or "_compressed" in path):
+        try:
+            os.remove(path)
+            debug_print(f"Deleted temp: {path}")
+        except Exception as e:
+            debug_print(f"Delete error: {e}")
 
-def delete_temp_file(file_path: str):
-    """
-    Deletes the file if it exists and if its name indicates it's a temporary file 
-    (i.e. contains "_resized" or "_compressed"). This prevents deletion of original images.
-    """
+def extract_parameters(image_path: str) -> str | None:
     try:
-        if os.path.exists(file_path):
-            basename = os.path.basename(file_path)
-            if "_resized" in basename or "_compressed" in basename:
-                os.remove(file_path)
-                debug_print(f"Temporary file '{file_path}' deleted after successful upload.")
-            else:
-                debug_print(f"File '{file_path}' is an original; not deleting.")
+        with Image.open(image_path) as img:
+            return img.info.get("parameters", "")
     except Exception as e:
-        debug_print(f"Failed to delete temporary file '{file_path}': {e}")
+        debug_print(f"Metadata read failed: {e}")
+        return ""
+
+def extract_loras(params: str) -> list[str]:
+    return re.findall(r"<lora:([^:>]+)", params, re.IGNORECASE)
 
 def send_to_telegram(image_path: str, chat_id: str, as_document=False):
-    """
-    Sends the file at image_path to the specified Telegram chat with retry attempts.
-    If as_document is True, sends as document; otherwise sends as photo.
-    In photo mode, if the file size exceeds 10MB, further compresses the image.
-    """
     if shared.opts.data.get("telegram_disable_sending", False):
-        debug_print(f"Sending disabled. Skipping file: {image_path}")
         return
-
-    bot_token = shared.opts.data.get("telegram_bot_token", "YOUR_BOT_TOKEN")
+    bot_token = shared.opts.data.get("telegram_bot_token", "")
     if not bot_token or bot_token == "YOUR_BOT_TOKEN":
-        print_colored("Telegram Bot Token is not configured – send canceled.")
         return
-
     if not as_document:
         try:
-            size = os.path.getsize(image_path)
-            threshold = 10 * 1024 * 1024  # 10MB
-            debug_print(f"Initial file size for photo: {size} bytes")
-            if size > threshold:
-                debug_print("File size exceeds 10MB; further compressing image.")
-                image_path = compress_image_for_telegram(image_path, target_size=threshold)
-                debug_print(f"New file size: {os.path.getsize(image_path)} bytes")
-        except Exception as e:
-            print_colored(f"Error checking file size: {e}")
-
+            if os.path.getsize(image_path) > 10 * 1024 * 1024:
+                image_path = compress_image(image_path)
+        except: pass
     method = "sendDocument" if as_document else "sendPhoto"
     param_name = "document" if as_document else "photo"
     url = f"https://api.telegram.org/bot{bot_token}/{method}"
-
     max_retries = int(shared.opts.data.get("telegram_retry_count", 3))
     delay = int(shared.opts.data.get("telegram_retry_delay", 5))
-
     for attempt in range(max_retries):
         try:
             with open(image_path, 'rb') as f:
                 files = {param_name: f}
                 data = {'chat_id': chat_id}
-                debug_print(f"Attempt {attempt+1}/{max_retries}: Sending request to {url} with chat_id {chat_id}")
                 response = requests.post(url, data=data, files=files)
             if response.ok:
-                print_colored(f"File '{image_path}' sent to Telegram (chat {chat_id}) as {method}.")
+                print_colored(f"Sent '{image_path}' to {chat_id} as {method}")
                 delete_temp_file(image_path)
                 return
             else:
-                print_colored(f"Error sending file (attempt {attempt+1}/{max_retries}): {response.text}")
+                print_colored(f"[{attempt+1}/{max_retries}] Error: {response.text}")
         except Exception as e:
-            print_colored(f"Exception on attempt {attempt+1}/{max_retries}: {e}")
+            print_colored(f"[{attempt+1}/{max_retries}] Exception: {e}")
         if attempt < max_retries - 1:
-            print_colored(f"Retrying in {delay} seconds...")
             time.sleep(delay)
-    print_colored(f"Failed to send '{image_path}' after {max_retries} attempts. File not deleted.")
 
 def on_image_saved(params):
-    """
-    Callback invoked after an image is saved.
-    Ignores files from "outputs/grids/".
-    Then extracts the key from the filename using "-lora" and routes the file accordingly.
-    If a matching chat ID is found in the channel mapping, sends:
-      - The resized (and further compressed, if necessary) image as a photo.
-      - If Full Resolution Mode is enabled, sends the original image as a document.
-    """
-    image_path = params.filename if hasattr(params, "filename") else None
+    if shared.opts.data.get("telegram_disable_sending", False):
+        return
+    
+    image_path = getattr(params, "filename", None)
     if not image_path or "outputs/grids/" in image_path.replace("\\", "/"):
         return
 
-    filename = os.path.basename(image_path)
-    debug_print(f"Filename: {filename}")
-    key = extract_key(filename).lower()
-    debug_print(f"Routing key: {key}")
-
-    mapping_str = shared.opts.data.get("telegram_channel_mapping", "")
-    debug_print(f"Mapping string: {mapping_str}")
-    mapping = {k.strip().lower(): v.strip() for k, v in (entry.split(":", 1) for entry in mapping_str.split(";") if ":" in entry)}
-    debug_print(f"Parsed mapping: {mapping}")
-    chat_id = mapping.get(key)
-    if not chat_id:
-        print_colored(f"No mapping found for key '{key}'. Not sending image.")
+    params_text = extract_parameters(image_path)
+    if not params_text:
+        debug_print("No parameters found in image metadata")
         return
 
-    print_colored(f"Sending '{image_path}' to Telegram (chat {chat_id}).")
+    steps_index = params_text.find("Steps:")
+    if steps_index != -1:
+        params_text = params_text[:steps_index].strip()
+    debug_print(f"Trimmed parameters: {params_text}")
 
-    # Resize image for sending as photo
-    resized_path = resize_image(image_path)
+    loras = extract_loras(params_text)
+    debug_print(f"LORAs found: {loras}")
+
+    mapping = {
+        k.strip().lower(): v.strip()
+        for k, v in (
+            entry.split(":", 1)
+            for entry in shared.opts.data.get("telegram_channel_mapping", "").split(";")
+            if ":" in entry
+        )
+    }
+
+    chat_id = None
+    for lora in loras:
+        lora_name = lora.lower()
+        for mapkey in mapping:
+            if mapkey.startswith("lora ") and mapkey[5:] in lora_name:
+                chat_id = mapping[mapkey]
+                debug_print(f"Matched '{mapkey}' to LoRA '{lora_name}'")
+                break
+        if chat_id:
+            break
+
+
+    positive_prompt = ""
+    negative_prompt = ""
+    
+
+    if "Negative prompt:" in params_text:
+        parts = params_text.split("Negative prompt:", 1)
+        positive_prompt = parts[0].strip().lower()
+        negative_prompt = parts[1].strip().lower()
+    else:
+        positive_prompt = params_text.strip().lower()
+    
+    debug_print(f"Positive prompt: {positive_prompt[:100]}...")
+    debug_print(f"Negative prompt: {negative_prompt[:100]}...")
+    
+
+    nsfw_channel = shared.opts.data.get("telegram_nsfw_channel", "").strip()
+    if nsfw_channel:
+
+        if "nsfw" in negative_prompt:
+            debug_print("NSFW in negative prompt - ignoring")
+
+        elif "nsfw" in positive_prompt:
+            debug_print("NSFW detected in positive prompt. Redirecting to NSFW channel.")
+            chat_id = nsfw_channel
+
+    if not chat_id:
+        print_colored("No matching chat_id found. Skipping image.")
+        return
+
+    resized = resize_image(image_path)
     try:
-        if os.path.getsize(resized_path) > 10 * 1024 * 1024:
-            resized_path = compress_image_for_telegram(resized_path)
-    except Exception as e:
-        print_colored(f"Error checking resized image size: {e}")
+        if os.path.getsize(resized) > 10 * 1024 * 1024:
+            resized = compress_image(resized)
+    except: pass
 
-    # Send resized version as photo
-    threading.Thread(target=send_to_telegram, args=(resized_path, chat_id, False)).start()
+    def send_both():
+        send_to_telegram(resized, chat_id, False)
+        if shared.opts.data.get("telegram_full_res", False):
+            send_to_telegram(image_path, chat_id, True)
 
-    # Send original as document if full resolution mode is enabled
-    if shared.opts.data.get("telegram_full_res", False):
-        threading.Thread(target=send_to_telegram, args=(image_path, chat_id, True)).start()
+    threading.Thread(target=send_both).start()
 
 script_callbacks.on_image_saved(on_image_saved)
 
 def on_ui_settings():
-    """Registers options in the UI settings menu."""
     section = ("telegram_sender", "Telegram Sender")
     shared.opts.add_option("telegram_bot_token", shared.OptionInfo("YOUR_BOT_TOKEN", "Telegram Bot Token", section=section))
-    shared.opts.add_option("telegram_channel_mapping", shared.OptionInfo("lora somelora:CHAT_ID", "Channel Mapping (format: key:chat_id; separate pairs with semicolons)", section=section))
-    shared.opts.add_option("telegram_full_res", shared.OptionInfo(False, "Send Full Resolution (as Document) along with resized copy", section=section))
-    shared.opts.add_option("telegram_disable_sending", shared.OptionInfo(False, "Disable Sending to Telegram", section=section))
-    shared.opts.add_option("telegram_debug_mode", shared.OptionInfo(False, "Enable Debug Mode", section=section))
-    shared.opts.add_option("telegram_max_size", shared.OptionInfo(2560, "Max size for portrait/square images (px)", section=section))
-    shared.opts.add_option("telegram_landscape_max_width", shared.OptionInfo(5120, "Max width for landscape images (px)", section=section))
-    shared.opts.add_option("telegram_retry_count", shared.OptionInfo(3, "Number of retry attempts", section=section))
-    shared.opts.add_option("telegram_retry_delay", shared.OptionInfo(5, "Delay between retry attempts (seconds)", section=section))
+    shared.opts.add_option("telegram_channel_mapping", shared.OptionInfo("lora somelora:CHAT_ID", "Channel Mapping (key:chat_id)", section=section))
+    shared.opts.add_option("telegram_nsfw_channel", shared.OptionInfo("", "NSFW Channel ID", section=section))
+    shared.opts.add_option("telegram_full_res", shared.OptionInfo(False, "Send original file as Document", section=section))
+    shared.opts.add_option("telegram_disable_sending", shared.OptionInfo(False, "Disable sending", section=section))
+    shared.opts.add_option("telegram_debug_mode", shared.OptionInfo(False, "Enable Debug", section=section))
+    shared.opts.add_option("telegram_max_size", shared.OptionInfo(2560, "Max image size", section=section))
+    shared.opts.add_option("telegram_landscape_max_width", shared.OptionInfo(5120, "Max width for landscape", section=section))
+    shared.opts.add_option("telegram_retry_count", shared.OptionInfo(3, "Retry attempts", section=section))
+    shared.opts.add_option("telegram_retry_delay", shared.OptionInfo(5, "Retry delay (s)", section=section))
 
 script_callbacks.on_ui_settings(on_ui_settings)
